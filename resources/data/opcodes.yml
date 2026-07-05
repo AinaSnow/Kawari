@@ -399,10 +399,18 @@ ServerZoneIpcType:
   comment: Unknown purpose.
   opcode: 504
   size: 32
-- name: PartyMemberPortraits
+- name: PartyMemberPortrait
   comment: Displays the party member portraits for this duty.
   opcode: 634
   size: 184
+- name: PartyMemberPortraits4
+  comment: Batch portraits for a 4-man duty (4 x 176B entries, slots 0..3).
+  opcode: 814
+  size: 704
+- name: PartyMemberPortraits8
+  comment: Batch portraits for an 8-man duty (8 x 176B entries, slots 0..7).
+  opcode: 623
+  size: 1408
 - name: FieldMarkerPreset
   comment: A player in the client's party has applied a waymark preset.
   opcode: 384
@@ -1028,6 +1036,10 @@ ClientZoneIpcType:
   comment: Happens when the client saves edits to their own adventurer plate.
   opcode: 487
   size: 200
+- name: SubmitBannerData
+  comment: Client submits the current gearset's portrait/banner (BannerData block).
+  opcode: 924
+  size: 56
 - name: SearchPlayers
   comment: Happens when the client searches for players under the Social window.
   opcode: 225

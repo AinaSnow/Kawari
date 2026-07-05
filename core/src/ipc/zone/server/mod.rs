@@ -332,6 +332,120 @@ impl Default for PlateDesign {
     }
 }
 
+/// The display "banner" block attached to a gearset's job portrait.
+///
+/// This is ClientStructs `BannerData` (0x34 / 52 bytes). It is reused verbatim across several
+/// packets: the client submits it via the `SubmitBannerData` upstream packet (opcode 924) when
+/// toggling the custom-portrait button or saving the banner editor, it is carried inline by
+/// `EquipGearset2` when switching to a gearset that has a valid linked portrait, and it forms
+/// the per-member `banner` field of `PartyMemberPortrait` (opcode 634).
+///
+/// Every field is a raw scalar (`u8`/`u16`/`u32`), written little-endian in declaration order.
+/// The trailing `checksum` is a CRC32 fingerprint of the gearset the banner was captured for;
+/// the server passes it through untouched and never recomputes it.
+#[binrw]
+#[derive(Debug, Clone)]
+pub struct PortraitBanner {
+    /// Valid flag.
+    pub has_data: u8,
+    pub expression: u8,
+    pub camera_zoom: u8,
+    pub dir_light_r: u8,
+    pub dir_light_g: u8,
+    pub dir_light_b: u8,
+    pub dir_light_brightness: u8,
+    pub amb_light_r: u8,
+    pub amb_light_g: u8,
+    pub amb_light_b: u8,
+    pub amb_light_brightness: u8,
+    pub flags: u8,
+    pub banner_timeline: u16,
+    pub animation_progress: u16,
+    pub head_direction_y: u16,
+    pub head_direction_x: u16,
+    pub eye_direction_y: u16,
+    pub eye_direction_x: u16,
+    pub camera_position_x: u16,
+    pub camera_position_y: u16,
+    pub camera_position_z: u16,
+    pub camera_target_x: u16,
+    pub camera_target_y: u16,
+    pub camera_target_z: u16,
+    pub image_rotation: u16,
+    pub directional_lighting_vertical: u16,
+    pub directional_lighting_horizontal: u16,
+    pub banner_decoration: u16,
+    pub banner_bg: u16,
+    pub banner_frame: u16,
+    /// Gearset CRC32 fingerprint; server passes through, never recomputes.
+    pub checksum: u32,
+}
+
+impl Default for PortraitBanner {
+    /// The "fairly standard" default banner values captured from a freshly-opened portrait on
+    /// retail, matching the equivalent fields of [`PlateDesign::default()`], so the portrait
+    /// renders reasonably before the player customizes it.
+    fn default() -> Self {
+        Self {
+            has_data: 1,
+            expression: 0,
+            camera_zoom: 160,
+            dir_light_r: 255,
+            dir_light_g: 255,
+            dir_light_b: 255,
+            dir_light_brightness: 127,
+            amb_light_r: 51,
+            amb_light_g: 51,
+            amb_light_b: 51,
+            amb_light_brightness: 127,
+            flags: 0,
+            banner_timeline: 1,
+            animation_progress: 0,
+            head_direction_y: 0,
+            head_direction_x: 0,
+            eye_direction_y: 0,
+            eye_direction_x: 0,
+            camera_position_x: 0,
+            camera_position_y: 0,
+            camera_position_z: 15564,
+            camera_target_x: 0,
+            camera_target_y: 0,
+            camera_target_z: 0,
+            image_rotation: 0,
+            directional_lighting_vertical: 133,
+            directional_lighting_horizontal: 65459,
+            banner_decoration: 1,
+            banner_bg: 8,
+            banner_frame: 1,
+            checksum: 0,
+        }
+    }
+}
+
+/// One party member's job portrait slot. 176 bytes. Wire-identical across opcode 634
+/// (single-slot, prefixed by an 8-byte slot header) and the batch packets 814 / 623
+/// (N of these back-to-back, no header). Field offsets verified against client
+/// sub_140BA7960 / sub_140BA7C90 / sub_140BA7F30.
+#[binrw]
+#[derive(Debug, Clone, Default)]
+pub struct PartyPortraitEntry {
+    /// Encrypted/session-level actor id. Kawari has no such system — send 0.
+    pub encrypted_aid: u64, // entry +0
+    pub content_id: u64,    // +8
+    /// Bitfield: show main/off-hand & head gear when weapon sheathed (same semantics as
+    /// `PlateDesign.gear_visibility_flag`).
+    pub gear_visibility_flag: u8, // +16
+    #[brw(pad_after = 2)] // +18..19 pad
+    pub class_job_id: u8, // +17
+    pub banner: PortraitBanner, // +20  (52B, checksum at entry+68)
+    pub item_ids: [u32; 12],    // +72
+    pub glasses: [u16; 2],      // +120
+    pub customize: CustomizeData, // +124 (26B)
+    pub stain0: [u8; 12],       // +150
+    #[brw(pad_after = 2)] // +174..175 pad
+    pub stain1: [u8; 12], // +162
+}
+
 #[opcode_data(ServerZoneIpcType)]
 #[binrw]
 #[br(import(magic: &ServerZoneIpcType, size: &u32))]
@@ -843,8 +957,21 @@ pub enum ServerZoneIpcData {
     UnkDirector1 {
         unk: [u8; 32],
     },
-    PartyMemberPortraits {
-        unk: [u8; 184],
+    /// A single party member's job portrait, sent when entering a duty (opcode 634, 184 bytes).
+    /// Phase 1 only defines the structure; the server does not yet send these.
+    PartyMemberPortrait {
+        /// Target slot 0..=7. Client discards the packet if >= 8.
+        #[brw(pad_after = 7)] // reserved
+        slot_index: u8,
+        entry: PartyPortraitEntry,
+    },
+    /// Batch portraits for a 4-man duty: 4 entries (slots 0..=3), no header. Opcode 814.
+    PartyMemberPortraits4 {
+        portraits: [PartyPortraitEntry; 4],
+    },
+    /// Batch portraits for an 8-man duty: 8 entries (slots 0..=7), no header. Opcode 623.
+    PartyMemberPortraits8 {
+        portraits: [PartyPortraitEntry; 8],
     },
     FieldMarkerPreset(WaymarkPreset),
     DeleteObject {
@@ -1629,5 +1756,18 @@ mod tests {
     #[test]
     fn server_zone_ipc_sizes() {
         test_opcodes::<ServerZoneIpcSegment>();
+    }
+
+    // The shared BannerData block must serialize to exactly 52 bytes.
+    #[test]
+    fn portrait_banner_size() {
+        crate::common::ensure_size::<PortraitBanner, 52>();
+    }
+
+    // The shared party portrait entry must serialize to exactly 176 bytes, wire-identical
+    // across opcodes 634 / 814 / 623.
+    #[test]
+    fn party_portrait_entry_size() {
+        crate::common::ensure_size::<PartyPortraitEntry, 176>();
     }
 }
