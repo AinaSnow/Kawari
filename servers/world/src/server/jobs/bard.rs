@@ -36,44 +36,21 @@ const ACTION_WANDERERS_MINUET: u32 = 3559;
 
 // Ability Actions (oGCD)
 const ACTION_EMPYREAL_ARROW: u32 = 3558;
-const ACTION_SIDEWINDER: u32 = 3562;
 const ACTION_PITCH_PERFECT: u32 = 7404;
 const ACTION_RADIANT_FINALE: u32 = 25785;
 const ACTION_BATTLE_VOICE: u32 = 118;
 const ACTION_RAGING_STRIKES: u32 = 101;
 const ACTION_BARRAGE: u32 = 107;
 const ACTION_TROUBADOUR: u32 = 7405;
-const ACTION_RAIN_OF_DEATH: u32 = 117;
 const ACTION_NATURES_MINNE: u32 = 7408;
-const ACTION_WARDENS_PAEAN: u32 = 3561;
-const ACTION_REPELLING_SHOT: u32 = 112;
 const ACTION_HEARTBREAK_SHOT: u32 = 36975;
 const ACTION_RESONANT_ARROW: u32 = 36976;
 const ACTION_RADIANT_ENCORE: u32 = 36977;
 
 // ==================== Status IDs ====================
 
-// DoT Statuses
-const STATUS_CAUSTIC_BITE: u16 = 1200;
-const STATUS_STORMBITE: u16 = 1201;
-
-// Song Statuses
-const STATUS_MAGES_BALLAD: u16 = 2217;
-const STATUS_ARMYS_PAEON: u16 = 2218;
-const STATUS_WANDERERS_MINUET: u16 = 2216;
-
 // Song Proc Statuses
-const STATUS_ARMYS_MUSE: u16 = 1932; // Army's Paeon proc - skill speed up
-const STATUS_ARMYS_ETHOS: u16 = 1933; // Army's Paeon next song proc
 const STATUS_REPERTOIRE: u16 = 3137; // Wanderer's Minuet proc - Pitch Perfect ready
-
-// Buff Statuses
-const STATUS_RAGING_STRIKES: u16 = 125;
-const STATUS_BATTLE_VOICE: u16 = 141;
-const STATUS_RADIANT_FINALE: u16 = 2964;
-const STATUS_BARRAGE: u16 = 128;
-const STATUS_TROUBADOUR: u16 = 1934;
-const STATUS_NATURES_MINNE: u16 = 1202;
 
 // Ready Statuses
 const STATUS_HAWK_EYE: u16 = 3861; // Refulgent Arrow / Shadowbite ready
@@ -907,30 +884,4 @@ pub(crate) fn refresh_bard_runtime_state_on_actor(
     }
 
     result
-}
-
-/// Check if the action is a Bard weaponskill (for Barrage consumption)
-pub(crate) fn is_bard_weaponskill(action_id: u32) -> bool {
-    matches!(
-        action_id,
-        ACTION_HEAVY_SHOT
-            | ACTION_BURST_SHOT
-            | ACTION_REFULGENT_ARROW
-            | ACTION_SHADOWBITE
-            | ACTION_CAUSTIC_BITE
-            | ACTION_STORMBITE
-            | ACTION_IRON_JAWS
-            | ACTION_APEX_ARROW
-            | ACTION_BLAST_ARROW
-    )
-}
-
-/// Get the status effect ID for the current song
-pub(crate) fn get_song_status_id(song: BardSong) -> Option<u16> {
-    match song {
-        BardSong::None => None,
-        BardSong::MagesBallad => Some(STATUS_MAGES_BALLAD),
-        BardSong::ArmysPaeon => Some(STATUS_ARMYS_PAEON),
-        BardSong::WanderersMinuet => Some(STATUS_WANDERERS_MINUET),
-    }
 }

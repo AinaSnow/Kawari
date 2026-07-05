@@ -1135,7 +1135,6 @@ impl BaseParameters {
             heal = apply_factor(heal, self.damage_trait_factor(), 100);
         }
         // Roll a critical heal (heals can crit but never direct-hit) plus ±5% variance.
-        let mut heal = heal;
         if fastrand::f64() < self.expected_crit_rate(level_modifier) {
             heal = apply_factor(heal, self.crit_damage_factor(level_modifier), 1000);
         }
