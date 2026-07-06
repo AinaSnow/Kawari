@@ -218,6 +218,58 @@ pub enum EffectKind {
     /// Seen in the Summon Carbuncle action.
     #[brw(magic = 62u8)]
     SummonPet { unk: [u8; 7] },
+    /// Knockback (bossmod 0x1F). `value` = row index into the Knockback Excel sheet (client reads
+    /// distance/direction/speed from it); `extra_distance` = param0 = additional distance on top of
+    /// the sheet distance. Client computes/applies its own displacement (player position is
+    /// client-authoritative); server sends the packet only.
+    #[brw(magic = 31u8)]
+    Knockback {
+        extra_distance: u8, // param0
+        unk: [u8; 4],       // param1-4, zero
+        knockback_id: u16,  // value = Knockback sheet row
+    },
+    /// Attract / pull-in, sheet-driven variant 1 (bossmod 0x20). `value` = row into the Attract
+    /// Excel sheet. Client self-animates the pull.
+    #[brw(magic = 32u8)]
+    Attract1 { unk: [u8; 5], attract_id: u16 },
+    /// Attract variant 2 (bossmod 0x21). Same layout as Attract1.
+    #[brw(magic = 33u8)]
+    Attract2 { unk: [u8; 5], attract_id: u16 },
+    /// Custom attract 1 (bossmod 0x22). No sheet lookup: `distance` = value, `min_distance` = param1,
+    /// `speed` = param0. param2-4 zero.
+    #[brw(magic = 34u8)]
+    AttractCustom1 {
+        speed: u8,        // param0
+        min_distance: u8, // param1
+        unk: [u8; 3],     // param2-4, zero
+        distance: u16,    // value
+    },
+    /// Custom attract 2 (bossmod 0x23). Same layout as AttractCustom1.
+    #[brw(magic = 35u8)]
+    AttractCustom2 {
+        speed: u8,
+        min_distance: u8,
+        unk: [u8; 3],
+        distance: u16,
+    },
+    /// Custom attract 3 (bossmod 0x24). Same layout as AttractCustom1.
+    #[brw(magic = 36u8)]
+    AttractCustom3 {
+        speed: u8,
+        min_distance: u8,
+        unk: [u8; 3],
+        distance: u16,
+    },
+    /// Directly set the target's HP (bossmod 0x4A, e.g. Zodiark's Kokytos). `hp` = value = new HP.
+    /// NOTE: u16 only — no large-value encoding, so HP > 65535 cannot be represented (fine for
+    /// set-to-1 / residual-HP mechanics). Server must ALSO mutate health_points and send an HP update;
+    /// the effect alone only tells the client to render the change.
+    #[brw(magic = 74u8)]
+    SetHP { unk: [u8; 5], hp: u16 },
+    /// Interrupt an in-progress cast (bossmod 0x4C). Distinct from magic-8 `InterruptAction` (which is
+    /// really NoEffectText). Empty payload. Server must ALSO cancel the target's cast.
+    #[brw(magic = 76u8)]
+    Interrupt {},
     /// Unknown effect (that should be added!)
     Unknown { magic: u8, unk: [u8; 7] },
 }
@@ -399,6 +451,224 @@ mod tests {
                 amount: 70_000,
             }
         );
+    }
+
+    #[test]
+    fn action_effect_damage_kind_writes_param0_severity_flags() {
+        // The client reads hit severity from param0 (byte index 1): bit5 = crit, bit6 = direct hit.
+        // Guard against regressing DamageKind's repr back to plain 0/1/2/3 (which the client ignores,
+        // making everything render as a Normal hit).
+        let cases = [
+            (DamageKind::Normal, 0x00u8),
+            (DamageKind::Critical, 0x20u8),
+            (DamageKind::DirectHit, 0x40u8),
+            (DamageKind::CriticalDirectHit, 0x60u8),
+        ];
+        for (kind, expected_param0) in cases {
+            let effect = ActionEffect {
+                kind: EffectKind::Damage {
+                    damage_kind: kind,
+                    damage_type: DamageType::Slashing,
+                    damage_element: DamageElement::Unaspected,
+                    bonus_percent: 0,
+                    unk3: 0,
+                    unk4: 0,
+                    amount: 100,
+                },
+            };
+            let mut writer = Cursor::new(Vec::new());
+            effect.write_le(&mut writer).unwrap();
+            let raw = writer.into_inner();
+            assert_eq!(raw[0], 3, "effect magic");
+            assert_eq!(raw[1], expected_param0, "param0 severity flags for {kind:?}");
+        }
+    }
+
+    #[test]
+    fn action_effect_knockback_round_trip() {
+        let effect = ActionEffect {
+            kind: EffectKind::Knockback {
+                extra_distance: 3,
+                unk: [0; 4],
+                knockback_id: 42,
+            },
+        };
+
+        let mut writer = Cursor::new(Vec::new());
+        effect.write_le(&mut writer).unwrap();
+        let raw = writer.into_inner();
+
+        assert_eq!(raw.len(), 8);
+        assert_eq!(raw[0], 31);
+        assert_eq!(raw[1], 3);
+        assert_eq!(u16::from_le_bytes([raw[6], raw[7]]), 42);
+
+        let mut reader = Cursor::new(raw);
+        let parsed = ActionEffect::read_le(&mut reader).unwrap();
+        assert_eq!(parsed.kind, effect.kind);
+    }
+
+    #[test]
+    fn action_effect_attract1_round_trip() {
+        let effect = ActionEffect {
+            kind: EffectKind::Attract1 {
+                unk: [0; 5],
+                attract_id: 17,
+            },
+        };
+
+        let mut writer = Cursor::new(Vec::new());
+        effect.write_le(&mut writer).unwrap();
+        let raw = writer.into_inner();
+
+        assert_eq!(raw.len(), 8);
+        assert_eq!(raw[0], 32);
+        assert_eq!(u16::from_le_bytes([raw[6], raw[7]]), 17);
+
+        let mut reader = Cursor::new(raw);
+        let parsed = ActionEffect::read_le(&mut reader).unwrap();
+        assert_eq!(parsed.kind, effect.kind);
+    }
+
+    #[test]
+    fn action_effect_attract2_round_trip() {
+        let effect = ActionEffect {
+            kind: EffectKind::Attract2 {
+                unk: [0; 5],
+                attract_id: 99,
+            },
+        };
+
+        let mut writer = Cursor::new(Vec::new());
+        effect.write_le(&mut writer).unwrap();
+        let raw = writer.into_inner();
+
+        assert_eq!(raw.len(), 8);
+        assert_eq!(raw[0], 33);
+        assert_eq!(u16::from_le_bytes([raw[6], raw[7]]), 99);
+
+        let mut reader = Cursor::new(raw);
+        let parsed = ActionEffect::read_le(&mut reader).unwrap();
+        assert_eq!(parsed.kind, effect.kind);
+    }
+
+    #[test]
+    fn action_effect_attract_custom1_round_trip() {
+        let effect = ActionEffect {
+            kind: EffectKind::AttractCustom1 {
+                speed: 5,
+                min_distance: 1,
+                unk: [0; 3],
+                distance: 10,
+            },
+        };
+
+        let mut writer = Cursor::new(Vec::new());
+        effect.write_le(&mut writer).unwrap();
+        let raw = writer.into_inner();
+
+        assert_eq!(raw.len(), 8);
+        assert_eq!(raw[0], 34);
+        assert_eq!(raw[1], 5);
+        assert_eq!(raw[2], 1);
+        assert_eq!(u16::from_le_bytes([raw[6], raw[7]]), 10);
+
+        let mut reader = Cursor::new(raw);
+        let parsed = ActionEffect::read_le(&mut reader).unwrap();
+        assert_eq!(parsed.kind, effect.kind);
+    }
+
+    #[test]
+    fn action_effect_attract_custom2_round_trip() {
+        let effect = ActionEffect {
+            kind: EffectKind::AttractCustom2 {
+                speed: 6,
+                min_distance: 2,
+                unk: [0; 3],
+                distance: 11,
+            },
+        };
+
+        let mut writer = Cursor::new(Vec::new());
+        effect.write_le(&mut writer).unwrap();
+        let raw = writer.into_inner();
+
+        assert_eq!(raw.len(), 8);
+        assert_eq!(raw[0], 35);
+        assert_eq!(raw[1], 6);
+        assert_eq!(raw[2], 2);
+        assert_eq!(u16::from_le_bytes([raw[6], raw[7]]), 11);
+
+        let mut reader = Cursor::new(raw);
+        let parsed = ActionEffect::read_le(&mut reader).unwrap();
+        assert_eq!(parsed.kind, effect.kind);
+    }
+
+    #[test]
+    fn action_effect_attract_custom3_round_trip() {
+        let effect = ActionEffect {
+            kind: EffectKind::AttractCustom3 {
+                speed: 7,
+                min_distance: 3,
+                unk: [0; 3],
+                distance: 12,
+            },
+        };
+
+        let mut writer = Cursor::new(Vec::new());
+        effect.write_le(&mut writer).unwrap();
+        let raw = writer.into_inner();
+
+        assert_eq!(raw.len(), 8);
+        assert_eq!(raw[0], 36);
+        assert_eq!(raw[1], 7);
+        assert_eq!(raw[2], 3);
+        assert_eq!(u16::from_le_bytes([raw[6], raw[7]]), 12);
+
+        let mut reader = Cursor::new(raw);
+        let parsed = ActionEffect::read_le(&mut reader).unwrap();
+        assert_eq!(parsed.kind, effect.kind);
+    }
+
+    #[test]
+    fn action_effect_set_hp_round_trip() {
+        let effect = ActionEffect {
+            kind: EffectKind::SetHP {
+                unk: [0; 5],
+                hp: 1,
+            },
+        };
+
+        let mut writer = Cursor::new(Vec::new());
+        effect.write_le(&mut writer).unwrap();
+        let raw = writer.into_inner();
+
+        assert_eq!(raw.len(), 8);
+        assert_eq!(raw[0], 74);
+        assert_eq!(u16::from_le_bytes([raw[6], raw[7]]), 1);
+
+        let mut reader = Cursor::new(raw);
+        let parsed = ActionEffect::read_le(&mut reader).unwrap();
+        assert_eq!(parsed.kind, effect.kind);
+    }
+
+    #[test]
+    fn action_effect_interrupt_round_trip() {
+        let effect = ActionEffect {
+            kind: EffectKind::Interrupt {},
+        };
+
+        let mut writer = Cursor::new(Vec::new());
+        effect.write_le(&mut writer).unwrap();
+        let raw = writer.into_inner();
+
+        assert_eq!(raw.len(), 8);
+        assert_eq!(raw[0], 76);
+        assert_eq!(&raw[1..8], &[0u8; 7]);
+
+        let mut reader = Cursor::new(raw);
+        let parsed = ActionEffect::read_le(&mut reader).unwrap();
+        assert_eq!(parsed.kind, effect.kind);
     }
 
     #[test]

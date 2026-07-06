@@ -7,13 +7,14 @@ use std::{
 use glam::Vec3;
 use kawari::{
     common::{
-        DirectorEvent, EOBJ_EXIT, EOBJ_SHORTCUT, EventState, HandlerId, JumpState,
-        MoveAnimationState, MoveAnimationType, ObjectId, ObjectTypeId, ObjectTypeKind, Position,
+        ANIMATION_LOCK_TIME, DirectorEvent, EOBJ_EXIT, EOBJ_SHORTCUT, EventState, HandlerId,
+        JumpState, MoveAnimationState, MoveAnimationType, ObjectId, ObjectTypeId, ObjectTypeKind,
+        Position,
     },
     ipc::zone::{
-        ActionEffect, ActionType, ActorControlCategory, ActorControlSelf, AoeEffect8,
-        AoeEffectHeader, BattleNpcSubKind, CharacterDataFlag, CommonSpawn, DamageElement,
-        DamageKind, DamageType, DisplayFlag, EffectKind, ObjectKind,
+        ActionEffect, ActionResult, ActionType, ActorControlCategory, ActorControlSelf,
+        AoeEffect8, AoeEffectHeader, BattleNpcSubKind, CharacterDataFlag, CommonSpawn,
+        DamageElement, DamageKind, DamageType, DisplayFlag, EffectKind, ObjectKind,
         ServerZoneIpcData, ServerZoneIpcSegment, SpawnNpc,
     },
 };
@@ -320,6 +321,26 @@ pub enum LuaDirectorTask {
         name_id: u32,
         position: Position,
         rotation: f32,
+    },
+    /// Send a single-target `ActionResult` carrying one bossmod-style effect (Knockback, Attract,
+    /// AttractCustom, SetHP, Interrupt, ...). Purely a packet: no server-side state change. `source`
+    /// defaults to `target` (animation source) and `action_id` defaults to 0.
+    EmitEffect {
+        target: ObjectId,
+        source: Option<ObjectId>,
+        action_id: u32,
+        effect: EffectKind,
+    },
+    /// Directly set `target`'s HP (clamped to its max) and notify the client via both the `SetHP`
+    /// effect (visual) and a normal HP sync packet.
+    SetActorHp {
+        target: ObjectId,
+        hp: u16,
+    },
+    /// Interrupt `target`'s in-progress cast: send the `Interrupt` effect and (if the target is an
+    /// NPC with an active cast lock) clear it server-side.
+    InterruptCast {
+        target: ObjectId,
     },
 }
 
@@ -1025,6 +1046,118 @@ impl UserData for LuaDirector {
         // Raidwide: hits every alive player. {source, delay, action?, damage?}.
         methods.add_method_mut("raidwide", |lua, this, params: Table| {
             this.push_aoe(lua, params, AoeShape::Everyone)
+        });
+
+        // --- bossmod-style single-target effects (packet only, no server state change unless noted) ---
+
+        // Knockback (bossmod ActionEffectType 0x1F / 31). `knockback_id` is the raw row index into
+        // the Knockback Excel sheet (client reads distance/direction/speed from it — we don't parse
+        // it here). {target, knockback_id, extra_distance?, source?, action?}.
+        methods.add_method_mut("knockback", |_, this, params: Table| {
+            let target = ObjectId(params.get::<u32>("target")?);
+            let knockback_id: u16 = params.get("knockback_id")?;
+            let extra_distance: u8 = params.get("extra_distance").unwrap_or(0);
+            let source: Option<u32> = params.get("source")?;
+            let action_id: u32 = params.get("action").unwrap_or(0);
+            this.tasks.push(LuaDirectorTask::EmitEffect {
+                target,
+                source: source.map(ObjectId),
+                action_id,
+                effect: EffectKind::Knockback {
+                    extra_distance,
+                    unk: [0; 4],
+                    knockback_id,
+                },
+            });
+            Ok(())
+        });
+
+        // Attract / pull-in, sheet-driven (bossmod 0x20/0x21). `attract_id` is the raw row index into
+        // the Attract Excel sheet. `variant` picks Attract1 (default) or Attract2 — both share the
+        // same layout, retail just uses two distinct effect types for different mechanics.
+        // {target, attract_id, variant?(1|2), source?, action?}.
+        methods.add_method_mut("attract", |_, this, params: Table| {
+            let target = ObjectId(params.get::<u32>("target")?);
+            let attract_id: u16 = params.get("attract_id")?;
+            let variant: u8 = params.get("variant").unwrap_or(1);
+            let source: Option<u32> = params.get("source")?;
+            let action_id: u32 = params.get("action").unwrap_or(0);
+            let effect = match variant {
+                2 => EffectKind::Attract2 {
+                    unk: [0; 5],
+                    attract_id,
+                },
+                _ => EffectKind::Attract1 {
+                    unk: [0; 5],
+                    attract_id,
+                },
+            };
+            this.tasks.push(LuaDirectorTask::EmitEffect {
+                target,
+                source: source.map(ObjectId),
+                action_id,
+                effect,
+            });
+            Ok(())
+        });
+
+        // Custom attract (bossmod 0x22/0x23/0x24): no sheet lookup, distance/speed given directly.
+        // `variant` picks AttractCustom1 (default), 2, or 3 — all share the same layout.
+        // {target, distance, min_distance?, speed?, variant?(1|2|3), source?, action?}.
+        methods.add_method_mut("attract_custom", |_, this, params: Table| {
+            let target = ObjectId(params.get::<u32>("target")?);
+            let distance: u16 = params.get("distance")?;
+            let min_distance: u8 = params.get("min_distance").unwrap_or(0);
+            let speed: u8 = params.get("speed").unwrap_or(0);
+            let variant: u8 = params.get("variant").unwrap_or(1);
+            let source: Option<u32> = params.get("source")?;
+            let action_id: u32 = params.get("action").unwrap_or(0);
+            let effect = match variant {
+                2 => EffectKind::AttractCustom2 {
+                    speed,
+                    min_distance,
+                    unk: [0; 3],
+                    distance,
+                },
+                3 => EffectKind::AttractCustom3 {
+                    speed,
+                    min_distance,
+                    unk: [0; 3],
+                    distance,
+                },
+                _ => EffectKind::AttractCustom1 {
+                    speed,
+                    min_distance,
+                    unk: [0; 3],
+                    distance,
+                },
+            };
+            this.tasks.push(LuaDirectorTask::EmitEffect {
+                target,
+                source: source.map(ObjectId),
+                action_id,
+                effect,
+            });
+            Ok(())
+        });
+
+        // Directly set `target`'s HP (bossmod 0x4A, e.g. Zodiark's Kokytos). Clamped to the target's
+        // max HP by the resolver. {target, hp}.
+        methods.add_method_mut("set_hp", |_, this, params: Table| {
+            let target = ObjectId(params.get::<u32>("target")?);
+            let hp: u32 = params.get("hp")?;
+            this.tasks.push(LuaDirectorTask::SetActorHp {
+                target,
+                hp: hp.min(u16::MAX as u32) as u16,
+            });
+            Ok(())
+        });
+
+        // Interrupt `target`'s in-progress cast (bossmod 0x4C). {target}.
+        methods.add_method_mut("interrupt_cast", |_, this, params: Table| {
+            let target = ObjectId(params.get::<u32>("target")?);
+            this.tasks.push(LuaDirectorTask::InterruptCast { target });
+            Ok(())
         });
     }
 }
@@ -2516,6 +2649,60 @@ pub fn director_tick(
                     tracing::warn!("Failed to find BNpcBase {base_id} for SpawnClone");
                 }
             }
+            LuaDirectorTask::EmitEffect {
+                target,
+                source,
+                action_id,
+                effect,
+            } => {
+                let source_id = source.unwrap_or(*target);
+                send_single_effect(network.clone(), instance, *target, source_id, *action_id, *effect);
+            }
+            LuaDirectorTask::SetActorHp { target, hp } => {
+                let mut applied_hp = *hp;
+                if let Some(actor) = instance.find_actor_mut(*target)
+                    && let Some(common) = actor.common_spawn_mut()
+                {
+                    let clamped = (*hp as u32).min(common.max_health_points);
+                    common.health_points = clamped;
+                    applied_hp = clamped.min(u16::MAX as u32) as u16;
+                }
+                send_single_effect(
+                    network.clone(),
+                    instance,
+                    *target,
+                    *target,
+                    0,
+                    EffectKind::SetHP {
+                        unk: [0; 5],
+                        hp: applied_hp,
+                    },
+                );
+                update_actor_hp_mp(network.clone(), instance, *target);
+            }
+            LuaDirectorTask::InterruptCast { target } => {
+                // NOTE (open item — see completion report): nothing in this codebase actually
+                // cancels an NPC's in-progress cast / pending mechanic resolution. `cast_locked`
+                // (set by CastBar) only freezes the caster's *movement*; it's cleared when the
+                // already-scheduled `resolve_aoe` timer fires (see
+                // `schedule_pending_aoes` in servers/world/src/server/mod.rs), and there's no
+                // cancel handle for that timer. So this can only send the client-facing
+                // `Interrupt` effect (cosmetic) — it does NOT stop the mechanic's damage from
+                // landing on time. Real cast cancellation would need a cancel handle threaded
+                // through `schedule_pending_aoes`.
+                tracing::warn!(
+                    "[interrupt_cast] target={target:?}: sending Interrupt effect only \
+                     — server-side cast cancellation is not implemented"
+                );
+                send_single_effect(
+                    network.clone(),
+                    instance,
+                    *target,
+                    *target,
+                    0,
+                    EffectKind::Interrupt {},
+                );
+            }
         }
     }
 
@@ -2529,6 +2716,53 @@ pub fn director_tick(
     }
 
     pending_aoes
+}
+
+/// Send a single-target `ActionResult` carrying one bossmod-style effect (Knockback, Attract,
+/// SetHP, Interrupt, ...), animated from `source_id` and sent to everyone in range of it (mirrors
+/// `resolve_aoe`'s `anim_source` pattern). Purely a packet — callers apply any server-side state
+/// change (HP, cast lock, ...) themselves before/after calling this.
+fn send_single_effect(
+    network: Arc<Mutex<NetworkState>>,
+    instance: &Instance,
+    target: ObjectId,
+    source_id: ObjectId,
+    action_id: u32,
+    effect: EffectKind,
+) {
+    let rotation = instance
+        .find_actor(source_id)
+        .map(|a| a.rotation())
+        .unwrap_or(0.0);
+    let target_type = ObjectTypeId {
+        object_id: target,
+        object_type: ObjectTypeKind::None,
+    };
+
+    let mut effects = [ActionEffect::default(); 8];
+    effects[0] = ActionEffect { kind: effect };
+
+    let mut network = network.lock();
+    let ipc = ServerZoneIpcSegment::new(ServerZoneIpcData::ActionResult(ActionResult {
+        animation_target_id: target_type,
+        target_id_again: target_type,
+        action_id,
+        animation_lock: ANIMATION_LOCK_TIME,
+        rotation,
+        spell_id: action_id as u16,
+        effect_count: 1,
+        effects,
+        action_type: ActionType::Action,
+        global_sequence: network.global_action_sequence,
+        ..Default::default()
+    }));
+    network.global_action_sequence += 1;
+    network.send_in_range_inclusive_instance(
+        source_id,
+        instance,
+        FromServer::PacketSegment(ipc, source_id),
+        DestinationNetwork::ZoneClients,
+    );
 }
 
 /// Resolve a pending AoE at its precise activation time: snapshot each alive player's *current*

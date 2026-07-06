@@ -203,6 +203,15 @@ impl UserData for EffectsBuilder {
             });
             Ok(())
         });
+        // This is the *real* interrupt (effect 76): it tells the client to actually cancel the
+        // target's in-progress cast. `interrupt()` above only pushes the magic-8 no-effect marker
+        // (e.g. Head Graze), which doesn't stop a cast on its own.
+        methods.add_method_mut("interrupt_cast", |_, this, _: ()| {
+            this.effects.push(ActionEffect {
+                kind: EffectKind::Interrupt {},
+            });
+            Ok(())
+        });
         methods.add_method_mut("play_vfx", |_, this, effect_id: u16| {
             this.effects.push(ActionEffect {
                 kind: EffectKind::PlayVFX {
